@@ -29,6 +29,10 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
+# Admin audio buffer: {user_id: {"items": [(file_id, title), ...], "task": asyncio.Task | None}}
+admin_audio_buffer: dict = {}
+BUFFER_DELAY = 2.0  # seconds to wait for more audio before showing category menu
+
 
 # ═══════════════════════════════════════════════════════════════════
 # FSM STATES
@@ -522,7 +526,7 @@ async def cmd_admin(msg: Message):
         f"├ 🎵 Аудіо: {stats['pranks']}\n"
         f"├ 🎧 Прослуховувань: {stats['plays']}\n"
         f"└ 📂 Категорій: {stats['categories']}\n\n"
-        "📤 Надішліть аудіо — назва визначається автоматично\n\n"
+        "📤 Надішліть аудіо (можна декілька) — назва автоматична\n\n"
         "<b>Команди:</b>\n"
         "/manage — Керування записами\n"
         "/broadcast Текст — Розсилка\n"
@@ -543,7 +547,6 @@ async def admin_audio(msg: Message, state: FSMContext):
         if msg.audio.title:
             title = msg.audio.title.strip()
         elif msg.audio.file_name:
-            # Remove extension (.mp3, .ogg, .wav, .m4a, etc.)
             name = msg.audio.file_name
             if "." in name:
                 title = name.rsplit(".", 1)[0].strip()
@@ -552,20 +555,48 @@ async def admin_audio(msg: Message, state: FSMContext):
     if not title:
         title = f"Аудіо #{msg.message_id}"
 
-    # Skip title input — go straight to category selection
-    await state.set_state(AddAudio.waiting_category)
-    await state.update_data(file_id=file_id, title=title)
+    user_id = msg.from_user.id
 
-    cats = await get_all_categories()
-    buttons = [[InlineKeyboardButton(text=f"{c['emoji']} {c['name']}", callback_data=f"fsm_cat_{c['id']}")] for c in cats[:30]]
-    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="fsm_cancel")])
+    # Add to buffer
+    if user_id not in admin_audio_buffer:
+        admin_audio_buffer[user_id] = {"items": [], "task": None}
 
-    await msg.answer(
-        f"📂 <b>Оберіть категорію для:</b>\n\n"
-        f"🎵 <b>{title}</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    admin_audio_buffer[user_id]["items"].append((file_id, title))
+
+    # Cancel previous debounce timer if exists
+    if admin_audio_buffer[user_id]["task"] and not admin_audio_buffer[user_id]["task"].done():
+        admin_audio_buffer[user_id]["task"].cancel()
+
+    # Start new debounce timer
+    async def show_category_menu():
+        await asyncio.sleep(BUFFER_DELAY)
+        items = admin_audio_buffer[user_id]["items"]
+        if not items:
+            return
+
+        # Save items to FSM state for category selection
+        await state.set_state(AddAudio.waiting_category)
+        await state.update_data(batch_items=items)
+
+        cats = await get_all_categories()
+        buttons = [[InlineKeyboardButton(text=f"{c['emoji']} {c['name']}", callback_data=f"fsm_cat_{c['id']}")] for c in cats[:30]]
+        buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="fsm_cancel")])
+
+        count = len(items)
+        if count == 1:
+            text = f"📂 <b>Оберіть категорію для:</b>\n\n🎵 <b>{items[0][1]}</b>"
+        else:
+            titles_preview = "\n".join(f"  • {t}" for _, t in items[:5])
+            extra = f"\n  ... та ще {count - 5}" if count > 5 else ""
+            text = f"📂 <b>Оберіть категорію для {count} аудіо:</b>\n\n{titles_preview}{extra}"
+
+        await msg.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+        # Clear buffer after showing menu
+        admin_audio_buffer[user_id]["items"] = []
+        admin_audio_buffer[user_id]["task"] = None
+
+    admin_audio_buffer[user_id]["task"] = asyncio.create_task(show_category_menu())
 
 
 @router.callback_query(F.data.startswith("fsm_cat_"))
@@ -575,34 +606,55 @@ async def admin_fsm_cat_selected(cb: CallbackQuery, state: FSMContext):
 
     cat_id = int(cb.data.split("_")[2])
     data = await state.get_data()
+    batch_items = data.get("batch_items", [])
 
-    if not data.get("file_id"):
+    if not batch_items:
         await state.clear()
         return await cb.answer("❌ Сесія закінчилась")
 
-    prank_id = await add_prank(data["title"], data["file_id"], cat_id)
     cat_name = await get_category_name(cat_id)
+    added = 0
+    skipped = 0
+
+    for file_id, title in batch_items:
+        prank_id = await add_prank(title, file_id, cat_id)
+        if prank_id:
+            added += 1
+        else:
+            skipped += 1
+
     await state.clear()
 
-    if prank_id:
-        buttons = [[InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"mren_{prank_id}")]]
-        await cb.message.edit_text(
-            f"✅ <b>Запис збережено!</b>\n\n"
-            f"🎵 {data['title']}\n"
-            f"📂 {cat_name}\n"
-            f"🆔 #{prank_id}",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
-        await cb.answer("✅ Збережено!")
-    else:
-        await cb.message.edit_text(
-            f"⚠️ <b>Аудіо вже існує</b>\n\n"
-            f"🎵 {data['title']}\n"
-            f"Дублікат не було створено.",
-            parse_mode="HTML"
-        )
-        await cb.answer("⚠️ Дублікат")
+    # Build result message
+    text = f"✅ <b>Додано {added} аудіо в категорію:</b>\n📂 {cat_name}"
+    if skipped > 0:
+        text += f"\n⚠️ Пропущено дублікатів: {skipped}"
+
+    buttons = [
+        [InlineKeyboardButton(text="📂 Вибрати іншу категорію", callback_data=f"fsm_recat_{cat_id}")],
+    ]
+
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer(f"✅ Додано {added}")
+
+
+@router.callback_query(F.data.startswith("fsm_recat_"))
+async def admin_fsm_recat(cb: CallbackQuery, state: FSMContext):
+    """Show category menu again to move recently added audio to another category."""
+    if cb.from_user.id not in ADMIN_IDS:
+        return await cb.answer("❌")
+
+    cats = await get_all_categories()
+    buttons = [[InlineKeyboardButton(text=f"{c['emoji']} {c['name']}", callback_data=f"fsm_cat_{c['id']}")] for c in cats[:30]]
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="fsm_cancel")])
+
+    # Check if we still have items in the user's buffer or need to get from DB
+    await cb.message.edit_text(
+        "📂 <b>Оберіть нову категорію:</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cb.answer()
 
 
 @router.callback_query(F.data == "fsm_cancel")
