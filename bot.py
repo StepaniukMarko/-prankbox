@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from config import BOT_TOKEN, ADMIN_IDS, REFERRAL_BONUS
-from database import init_db, get_db, CATEGORIES_PAGES
+from database import init_db, get_pool, CATEGORIES_PAGES
 from keyboards import main_menu, pranks_menu, category_page_kb, prank_card_kb, admin_cat_kb, admin_prank_kb
 
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -29,34 +29,31 @@ class RenameAudio(StatesGroup):
 
 # === HELPERS ===
 async def ensure_user(msg, ref_id=None):
-    db = await get_db()
-    cur = await db.execute("SELECT 1 FROM users WHERE telegram_id=?", (msg.from_user.id,))
-    if not await cur.fetchone():
-        await db.execute("INSERT INTO users (telegram_id, username, first_name) VALUES (?,?,?)",
-                         (msg.from_user.id, msg.from_user.username, msg.from_user.first_name))
-        if ref_id and ref_id != msg.from_user.id:
-            await db.execute("INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?,?)", (ref_id, msg.from_user.id))
-            await db.execute("UPDATE users SET referral_count=referral_count+1, balance=balance+? WHERE telegram_id=?", (REFERRAL_BONUS, ref_id))
-        await db.commit()
-    await db.close()
+    pool = await get_pool()
+    async with pool.acquire() as db:
+        row = await db.fetchrow("SELECT 1 FROM users WHERE telegram_id=$1", msg.from_user.id)
+        if not row:
+            await db.execute("INSERT INTO users (telegram_id, username, first_name) VALUES ($1,$2,$3)",
+                             msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+            if ref_id and ref_id != msg.from_user.id:
+                await db.execute("INSERT INTO referrals (referrer_id, referred_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", ref_id, msg.from_user.id)
+                await db.execute("UPDATE users SET referral_count=referral_count+1, balance=balance+$1 WHERE telegram_id=$2", REFERRAL_BONUS, ref_id)
 
 async def get_page_cats(group: str, page: int):
+    from config import CATEGORIES_PAGES
     pages = CATEGORIES_PAGES.get(group, [])
     if page < 0 or page >= len(pages): return [], 0
-    db = await get_db()
-    ids = [c[2] for c in pages[page]]
-    placeholders = ",".join("?" * len(ids))
-    cur = await db.execute(f"SELECT id, name FROM categories WHERE id IN ({placeholders}) ORDER BY sort_order", ids)
-    rows = await cur.fetchall()
-    await db.close()
-    return [{"id": r[0], "name": r[1]} for r in rows], len(pages)
+    pool = await get_pool()
+    async with pool.acquire() as db:
+        ids = [c[2] for c in pages[page]]
+        rows = await db.fetch("SELECT id, name FROM categories WHERE id = ANY($1) ORDER BY sort_order", ids)
+    return [{"id": r["id"], "name": r["name"]} for r in rows], len(pages)
 
 async def get_pranks_in_cat(cat_id: int):
-    db = await get_db()
-    cur = await db.execute("SELECT id, title, play_count FROM pranks WHERE category_id=? AND hidden=0 ORDER BY id", (cat_id,))
-    rows = await cur.fetchall()
-    await db.close()
-    return rows
+    pool = await get_pool()
+    async with pool.acquire() as db:
+        rows = await db.fetch("SELECT id, title, play_count FROM pranks WHERE category_id=$1 AND hidden=0 ORDER BY id", cat_id)
+    return [(r["id"], r["title"], r["play_count"]) for r in rows]
 
 # === COMMANDS ===
 @router.message(Command("start"))
