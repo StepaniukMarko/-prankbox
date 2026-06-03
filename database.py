@@ -46,14 +46,6 @@ async def init_db():
             updated_at TIMESTAMP DEFAULT NOW()
         );
 
-        CREATE TABLE IF NOT EXISTS favorites (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            prank_id INTEGER NOT NULL REFERENCES pranks(id) ON DELETE CASCADE,
-            created_at TIMESTAMP DEFAULT NOW(),
-            UNIQUE(user_id, prank_id)
-        );
-
         CREATE TABLE IF NOT EXISTS referrals (
             id SERIAL PRIMARY KEY,
             referrer_id BIGINT NOT NULL,
@@ -63,7 +55,6 @@ async def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_pranks_category ON pranks(category_id);
         CREATE INDEX IF NOT EXISTS idx_pranks_play_count ON pranks(play_count DESC);
-        CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id);
         CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
         """)
 
@@ -220,9 +211,8 @@ async def add_prank(title: str, file_id: str, category_id: int):
 
 
 async def delete_prank(prank_id: int):
-    """Delete prank and its favorites."""
+    """Delete prank."""
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM favorites WHERE prank_id=$1", prank_id)
         await conn.execute("DELETE FROM pranks WHERE id=$1", prank_id)
 
 
@@ -242,39 +232,6 @@ async def change_prank_category(prank_id: int, cat_id: int):
             "UPDATE pranks SET category_id=$1, updated_at=NOW() WHERE id=$2",
             cat_id, prank_id
         )
-
-
-# ─── FAVORITES OPERATIONS ─────────────────────────────────────────
-
-async def add_favorite(user_id: int, prank_id: int) -> bool:
-    """Add to favorites. Returns True if added, False if already exists."""
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute(
-                "INSERT INTO favorites (user_id, prank_id) VALUES ($1, $2)",
-                user_id, prank_id
-            )
-            return True
-        except asyncpg.UniqueViolationError:
-            return False
-
-
-async def get_favorites(user_id: int):
-    """Get user's favorite pranks."""
-    async with pool.acquire() as conn:
-        return await conn.fetch(
-            """SELECT p.id, p.title, p.file_id, p.play_count
-               FROM favorites f JOIN pranks p ON f.prank_id = p.id
-               WHERE f.user_id = $1 ORDER BY f.created_at DESC""",
-            user_id
-        )
-
-
-async def get_favorites_count(user_id: int) -> int:
-    """Get count of user favorites."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM favorites WHERE user_id=$1", user_id)
-        return row["cnt"] if row else 0
 
 
 # ─── STATS OPERATIONS ─────────────────────────────────────────────

@@ -337,7 +337,7 @@ async def menu_random(msg: Message):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SHARE BOT (replaces Favorites in menu)
+# SHARE BOT
 # ═══════════════════════════════════════════════════════════════════
 
 @router.message(F.text == "📢 Поділитися ботом")
