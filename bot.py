@@ -17,8 +17,7 @@ from database import (
     get_bot_stats, get_all_users_ids, get_pranks_paginated, get_category_name,
     get_category_info,
     create_prank_call, update_call_payment, update_call_status,
-    complete_call, fail_call, get_prank_call, get_calls_stats,
-    get_pranks_for_calls
+    complete_call, fail_call, get_prank_call, get_calls_stats
 )
 from keyboards import (
     main_menu, pranks_menu, category_page_kb, prank_list_kb, prank_audio_kb,
@@ -502,72 +501,75 @@ async def cb_back_cat(cb: CallbackQuery):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PRANK CALLS (dynamic from DB)
+# PRANK CALLS — category → audio → phone → pay → call
 # ═══════════════════════════════════════════════════════════════════
 
-CALLS_PER_PAGE = 10
+CALL_AUDIO_PER_PAGE = 10
 
 
 @router.message(F.text == "📞 Пранк-дзвінки")
 async def menu_calls(msg: Message):
-    rows, total = await get_pranks_for_calls(0, CALLS_PER_PAGE)
-
-    if not rows:
-        return await msg.answer(
-            "📞 <b>Пранк-дзвінки</b>\n\n"
-            "📭 Поки немає аудіо для дзвінків.\n"
-            "Заходьте пізніше!",
-            parse_mode="HTML"
-        )
+    """Show categories for prank calls (same structure as Розіграші)."""
+    cats, total = await get_page_categories("categories", 0)
+    if not cats:
+        return await msg.answer("📭 Поки немає категорій")
 
     buttons = []
-    for r in rows:
-        buttons.append([InlineKeyboardButton(
-            text=f"📞 {r['title']}",
-            callback_data=f"callaudio_{r['id']}"
-        )])
+    row = []
+    for c in cats:
+        row.append(InlineKeyboardButton(text=c["name"], callback_data=f"clcat_{c['id']}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
 
-    # Pagination
-    total_pages = (total + CALLS_PER_PAGE - 1) // CALLS_PER_PAGE
-    if total_pages > 1:
-        buttons.append([InlineKeyboardButton(text=f"1/{total_pages}", callback_data="noop"),
-                        InlineKeyboardButton(text="Далі ▶️", callback_data="callpage_1")])
+    nav = []
+    if total > 1:
+        nav.append(InlineKeyboardButton(text=f"📄 1/{total}", callback_data="noop"))
+        nav.append(InlineKeyboardButton(text="Далі ▶️", callback_data="clpg_categories_1"))
+    if nav:
+        buttons.append(nav)
 
     await msg.answer(
         f"📞 <b>Пранк-дзвінки</b>\n\n"
-        f"Обери аудіо для дзвінка.\n"
+        f"Обери категорію, потім аудіо для дзвінка.\n"
         f"Бот зателефонує та програє вибраний пранк!\n\n"
-        f"💰 Вартість: {CALL_PRICE_STARS} ⭐\n"
-        f"🎵 Доступно: {total} аудіо",
+        f"💰 Вартість: {CALL_PRICE_STARS} ⭐",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
 
-@router.callback_query(F.data.startswith("callpage_"))
-async def cb_call_page(cb: CallbackQuery):
-    page = int(cb.data.replace("callpage_", ""))
-    offset = page * CALLS_PER_PAGE
-    rows, total = await get_pranks_for_calls(offset, CALLS_PER_PAGE)
+@router.callback_query(F.data.startswith("clpg_"))
+async def cb_call_cat_page(cb: CallbackQuery):
+    """Pagination for call categories."""
+    parts = cb.data.split("_")
+    group = parts[1]
+    page = int(parts[2])
+    cats, total = await get_page_categories(group, page)
 
-    if not rows:
-        return await cb.answer("Немає більше аудіо")
+    if not cats:
+        return await cb.answer("Немає більше сторінок")
 
     buttons = []
-    for r in rows:
-        buttons.append([InlineKeyboardButton(
-            text=f"📞 {r['title']}",
-            callback_data=f"callaudio_{r['id']}"
-        )])
+    row = []
+    for c in cats:
+        row.append(InlineKeyboardButton(text=c["name"], callback_data=f"clcat_{c['id']}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
 
-    total_pages = (total + CALLS_PER_PAGE - 1) // CALLS_PER_PAGE
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"callpage_{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"callpage_{page+1}"))
-    buttons.append(nav)
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"clpg_{group}_{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"📄 {page+1}/{total}", callback_data="noop"))
+    if page < total - 1:
+        nav.append(InlineKeyboardButton(text="Далі ▶️", callback_data=f"clpg_{group}_{page+1}"))
+    if nav:
+        buttons.append(nav)
 
     await cb.message.edit_text(
         f"📞 <b>Пранк-дзвінки</b> (стор. {page+1})\n\n"
@@ -578,11 +580,113 @@ async def cb_call_page(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("callaudio_"))
-async def cb_call_select_audio(cb: CallbackQuery, state: FSMContext):
-    prank_id = int(cb.data.replace("callaudio_", ""))
-    prank = await get_prank(prank_id)
+@router.callback_query(F.data.startswith("clcat_"))
+async def cb_call_open_cat(cb: CallbackQuery):
+    """Show audio list in selected category for calls."""
+    cat_id = int(cb.data.replace("clcat_", ""))
+    rows, total = await get_pranks_by_category_page(cat_id, 0, CALL_AUDIO_PER_PAGE)
 
+    if not rows:
+        return await cb.answer("📭 У цій категорії немає аудіо", show_alert=True)
+
+    cat_name = await get_category_name(cat_id)
+
+    buttons = []
+    for r in rows:
+        buttons.append([InlineKeyboardButton(
+            text=f"📞 {r['title']}",
+            callback_data=f"claud_{r['id']}"
+        )])
+
+    total_pages = (total + CALL_AUDIO_PER_PAGE - 1) // CALL_AUDIO_PER_PAGE
+    if total_pages > 1:
+        buttons.append([
+            InlineKeyboardButton(text=f"1/{total_pages}", callback_data="noop"),
+            InlineKeyboardButton(text="▶️", callback_data=f"clalist_{cat_id}_1")
+        ])
+
+    buttons.append([InlineKeyboardButton(text="↩️ До категорій", callback_data="clback")])
+
+    await cb.message.edit_text(
+        f"📞 <b>{cat_name}</b> — {total} аудіо\n\nОбери аудіо для дзвінка:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("clalist_"))
+async def cb_call_audio_page(cb: CallbackQuery):
+    """Pagination for audio within a call category."""
+    parts = cb.data.split("_")
+    cat_id = int(parts[1])
+    page = int(parts[2])
+    offset = page * CALL_AUDIO_PER_PAGE
+
+    rows, total = await get_pranks_by_category_page(cat_id, offset, CALL_AUDIO_PER_PAGE)
+    if not rows:
+        return await cb.answer("Немає більше аудіо")
+
+    cat_name = await get_category_name(cat_id)
+    buttons = []
+    for r in rows:
+        buttons.append([InlineKeyboardButton(
+            text=f"📞 {r['title']}",
+            callback_data=f"claud_{r['id']}"
+        )])
+
+    total_pages = (total + CALL_AUDIO_PER_PAGE - 1) // CALL_AUDIO_PER_PAGE
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"clalist_{cat_id}_{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"clalist_{cat_id}_{page+1}"))
+    buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="↩️ До категорій", callback_data="clback")])
+
+    await cb.message.edit_text(
+        f"📞 <b>{cat_name}</b> (стор. {page+1})\n\nОбери аудіо для дзвінка:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "clback")
+async def cb_call_back_to_cats(cb: CallbackQuery):
+    """Back to call categories."""
+    cats, total = await get_page_categories("categories", 0)
+    buttons = []
+    row = []
+    for c in cats:
+        row.append(InlineKeyboardButton(text=c["name"], callback_data=f"clcat_{c['id']}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    nav = []
+    if total > 1:
+        nav.append(InlineKeyboardButton(text=f"📄 1/{total}", callback_data="noop"))
+        nav.append(InlineKeyboardButton(text="Далі ▶️", callback_data="clpg_categories_1"))
+    if nav:
+        buttons.append(nav)
+
+    await cb.message.edit_text(
+        f"📞 <b>Пранк-дзвінки</b>\n\nОбери категорію:\n💰 Вартість: {CALL_PRICE_STARS} ⭐",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("claud_"))
+async def cb_call_select_audio(cb: CallbackQuery, state: FSMContext):
+    """User selected audio for call — ask phone number."""
+    prank_id = int(cb.data.replace("claud_", ""))
+    prank = await get_prank(prank_id)
     if not prank:
         return await cb.answer("❌ Аудіо не знайдено")
 
@@ -593,8 +697,7 @@ async def cb_call_select_audio(cb: CallbackQuery, state: FSMContext):
         f"📞 <b>Пранк-дзвінок</b>\n\n"
         f"🎵 Аудіо: <b>{prank['title']}</b>\n"
         f"💰 Вартість: {CALL_PRICE_STARS} ⭐\n\n"
-        "Введіть номер телефону у форматі:\n"
-        "<code>+380XXXXXXXXX</code>",
+        "Введіть номер телефону:\n<code>+380XXXXXXXXX</code>",
         parse_mode="HTML"
     )
     await cb.answer()
@@ -603,32 +706,21 @@ async def cb_call_select_audio(cb: CallbackQuery, state: FSMContext):
 @router.message(PrankCall.waiting_phone)
 async def call_phone_entered(msg: Message, state: FSMContext):
     phone = msg.text.strip() if msg.text else ""
-
     import re
     if not re.match(r"^\+380\d{9}$", phone):
         return await msg.answer(
-            "❌ <b>Невірний формат номера</b>\n\n"
-            "Введіть номер у форматі: <code>+380XXXXXXXXX</code>\n"
-            "(12 цифр, починається з +380)",
+            "❌ <b>Невірний формат</b>\n\nВведіть: <code>+380XXXXXXXXX</code>",
             parse_mode="HTML"
         )
 
     data = await state.get_data()
     prank_id = data.get("prank_id")
     prank_title = data.get("prank_title", "—")
-
     if not prank_id:
         await state.clear()
         return await msg.answer("❌ Помилка. Спробуйте заново.", reply_markup=main_menu())
 
-    # Create call order
-    call_id = await create_prank_call(
-        user_id=msg.from_user.id,
-        username=msg.from_user.username or "",
-        phone_number=phone,
-        prank_id=prank_id
-    )
-
+    call_id = await create_prank_call(msg.from_user.id, msg.from_user.username or "", phone, prank_id)
     await state.clear()
 
     await msg.answer(
@@ -636,7 +728,7 @@ async def call_phone_entered(msg: Message, state: FSMContext):
         f"┌ 🎵 Аудіо: <b>{prank_title}</b>\n"
         f"├ 📱 Номер: <code>{phone}</code>\n"
         f"└ 💰 Вартість: {CALL_PRICE_STARS} ⭐\n\n"
-        "Натисніть «Оплатити» для підтвердження:",
+        "Натисніть «Оплатити»:",
         parse_mode="HTML",
         reply_markup=call_confirm_kb(call_id)
     )
@@ -646,23 +738,21 @@ async def call_phone_entered(msg: Message, state: FSMContext):
 async def cb_call_pay(cb: CallbackQuery):
     call_id = int(cb.data.replace("callpay_", ""))
     call = await get_prank_call(call_id)
-
     if not call:
-        return await cb.answer("❌ Замовлення не знайдено")
+        return await cb.answer("❌ Не знайдено")
     if call["user_id"] != cb.from_user.id:
-        return await cb.answer("❌ Це не ваше замовлення")
+        return await cb.answer("❌ Не ваше замовлення")
     if call["status"] != "pending_payment":
-        return await cb.answer("⚠️ Вже оплачено або скасовано")
+        return await cb.answer("⚠️ Вже оплачено")
 
-    # Get prank title for invoice
     prank = await get_prank(call["prank_id"]) if call["prank_id"] else None
-    prank_title = prank["title"] if prank else "Пранк-дзвінок"
+    title = prank["title"] if prank else "Пранк-дзвінок"
 
     from aiogram.types import LabeledPrice
     await bot.send_invoice(
         chat_id=cb.from_user.id,
-        title=f"📞 {prank_title}",
-        description=f"Пранк-дзвінок на {call['phone_number']}",
+        title=f"📞 {title}",
+        description=f"Дзвінок на {call['phone_number']}",
         payload=f"call_{call_id}",
         currency="XTR",
         prices=[LabeledPrice(label="Пранк-дзвінок", amount=CALL_PRICE_STARS)],
@@ -672,103 +762,68 @@ async def cb_call_pay(cb: CallbackQuery):
 
 @router.pre_checkout_query()
 async def pre_checkout(query):
-    """Accept all pre-checkout queries for Stars payments."""
     await query.answer(ok=True)
 
 
 @router.message(F.successful_payment)
 async def successful_payment(msg: Message):
-    """Handle successful Stars payment."""
     payload = msg.successful_payment.invoice_payload
-
     if not payload.startswith("call_"):
         return
-
     call_id = int(payload.replace("call_", ""))
     payment_id = msg.successful_payment.telegram_payment_charge_id
-
     await update_call_payment(call_id, payment_id)
 
     call = await get_prank_call(call_id)
     prank = await get_prank(call["prank_id"]) if call["prank_id"] else None
-    prank_title = prank["title"] if prank else "—"
+    title = prank["title"] if prank else "—"
 
     await msg.answer(
         "✅ <b>Оплату отримано!</b>\n\n"
-        f"📞 Дзвінок поставлено в чергу\n"
-        f"🎵 Аудіо: <b>{prank_title}</b>\n"
-        f"📱 Номер: <code>{call['phone_number']}</code>\n\n"
-        "⏳ Очікуйте — дзвінок буде виконано найближчим часом.",
-        parse_mode="HTML",
-        reply_markup=main_menu()
+        f"📞 Дзвінок в черзі\n"
+        f"🎵 <b>{title}</b>\n"
+        f"📱 <code>{call['phone_number']}</code>\n\n"
+        "⏳ Очікуйте.",
+        parse_mode="HTML", reply_markup=main_menu()
     )
-
-    # Initiate the call in background
     asyncio.create_task(execute_prank_call(call_id, msg.from_user.id))
 
 
 async def execute_prank_call(call_id: int, user_id: int):
-    """Background task: execute the prank call via provider."""
     call = await get_prank_call(call_id)
     if not call:
         return
-
     await update_call_status(call_id, "calling")
-
-    # Get audio file_id
     prank = await get_prank(call["prank_id"]) if call["prank_id"] else None
     if not prank:
         await fail_call(call_id)
-        await bot.send_message(user_id, "❌ Аудіо не знайдено. Зверніться до підтримки.", parse_mode="HTML")
+        await bot.send_message(user_id, "❌ Аудіо не знайдено.", parse_mode="HTML")
         return
 
     provider = get_call_provider()
     try:
         result = await provider.make_call(call["phone_number"], prank["file_id"])
-
         if result.success:
             await complete_call(call_id, result.duration, result.recording_url)
-
-            minutes = result.duration // 60
-            seconds = result.duration % 60
-            duration_str = f"{minutes}:{seconds:02d}" if minutes else f"{seconds} сек"
-
-            text = (
-                "✅ <b>Дзвінок завершено!</b>\n\n"
-                f"🎵 Аудіо: <b>{prank['title']}</b>\n"
-                f"⏱ Тривалість: {duration_str}\n"
-            )
-
+            mins = result.duration // 60
+            secs = result.duration % 60
+            dur = f"{mins}:{secs:02d}" if mins else f"{secs} сек"
+            text = f"✅ <b>Дзвінок завершено!</b>\n\n🎵 <b>{prank['title']}</b>\n⏱ {dur}"
             if result.recording_url:
-                text += "\n🎧 Запис дзвінка:"
-
+                text += "\n🎧 Запис:"
             await bot.send_message(user_id, text, parse_mode="HTML")
-
-            # Send recording if available
             if result.recording_url:
-                recording_bytes = await provider.get_recording(result.provider_call_id)
-                if recording_bytes:
+                rec = await provider.get_recording(result.provider_call_id)
+                if rec:
                     from aiogram.types import BufferedInputFile
-                    audio_file = BufferedInputFile(recording_bytes, filename="prank_call.ogg")
-                    await bot.send_audio(user_id, audio_file, caption="🎧 Запис пранк-дзвінка")
+                    await bot.send_audio(user_id, BufferedInputFile(rec, "prank_call.ogg"), caption="🎧 Запис")
         else:
             await fail_call(call_id)
-            await bot.send_message(
-                user_id,
-                "❌ <b>Дзвінок не вдався</b>\n\n"
-                "Абонент не відповів або номер недоступний.\n"
-                "Зверніться до підтримки для повернення коштів.",
-                parse_mode="HTML"
-            )
+            await bot.send_message(user_id, "❌ Дзвінок не вдався. Зверніться до підтримки.", parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Call {call_id} failed with error: {e}")
+        logger.error(f"Call {call_id} error: {e}")
         await fail_call(call_id)
-        await bot.send_message(
-            user_id,
-            "❌ <b>Помилка при виконанні дзвінка</b>\n\n"
-            "Зверніться до підтримки.",
-            parse_mode="HTML"
-        )
+        await bot.send_message(user_id, "❌ Помилка. Зверніться до підтримки.", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "call_cancel")
