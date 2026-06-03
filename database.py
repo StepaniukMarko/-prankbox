@@ -157,6 +157,20 @@ async def get_pranks_by_category(cat_id: int):
     return [(r["id"], r["title"], r["play_count"]) for r in rows]
 
 
+async def get_pranks_by_category_page(cat_id: int, offset: int = 0, limit: int = 10):
+    """Get paginated pranks in a category with file_id for playback."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, title, file_id, play_count FROM pranks WHERE category_id=$1 AND hidden=0 ORDER BY id LIMIT $2 OFFSET $3",
+            cat_id, limit, offset
+        )
+        count_row = await conn.fetchval(
+            "SELECT COUNT(*) FROM pranks WHERE category_id=$1 AND hidden=0",
+            cat_id
+        )
+    return rows, count_row or 0
+
+
 async def get_prank(prank_id: int):
     """Get a single prank by ID."""
     async with pool.acquire() as conn:

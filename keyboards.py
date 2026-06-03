@@ -46,29 +46,38 @@ def category_page_kb(cats: list, page: int, total_pages: int, group: str):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def prank_card_kb(prank_id: int, cat_id: int, index: int, total: int):
-    """Inline keyboard for a single prank card."""
-    row1 = [InlineKeyboardButton(text="▶️ Слухати", callback_data=f"play_{prank_id}")]
-    row2 = [
-        InlineKeyboardButton(text="❤️ В обране", callback_data=f"fav_{prank_id}"),
-        InlineKeyboardButton(text="📤 Надіслати", switch_inline_query=f"prank_{prank_id}"),
-    ]
+def prank_list_kb(pranks: list, cat_id: int, page: int, total_count: int, per_page: int = 10):
+    """Inline keyboard showing a list of pranks in a category with pagination."""
+    buttons = []
+    for p in pranks:
+        buttons.append([
+            InlineKeyboardButton(text=f"▶️ {p['title']}", callback_data=f"play_{p['id']}"),
+            InlineKeyboardButton(text="📢", callback_data=f"share_{p['id']}"),
+        ])
 
-    # Navigation
-    row3 = []
-    if index > 0:
-        row3.append(InlineKeyboardButton(text="⬅️", callback_data=f"pnav_{cat_id}_{index-1}"))
-    row3.append(InlineKeyboardButton(text=f"{index+1}/{total}", callback_data="noop"))
-    if index < total - 1:
-        row3.append(InlineKeyboardButton(text="➡️", callback_data=f"pnav_{cat_id}_{index+1}"))
+    # Pagination
+    total_pages = (total_count + per_page - 1) // per_page
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=f"clist_{cat_id}_{page-1}"))
+        nav.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=f"clist_{cat_id}_{page+1}"))
+        buttons.append(nav)
 
-    row4 = [InlineKeyboardButton(text="🔙 До категорії", callback_data=f"backcat_{cat_id}")]
+    buttons.append([InlineKeyboardButton(text="↩️ Назад до категорій", callback_data=f"backcat_{cat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-    kb = [row1, row2]
-    if row3:
-        kb.append(row3)
-    kb.append(row4)
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def prank_audio_kb(prank_id: int):
+    """Buttons shown under a played audio — share bot only (no ❤️ duplicate)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📢 Поділитися ботом", callback_data=f"share_{prank_id}"),
+            InlineKeyboardButton(text="❤️", callback_data=f"fav_{prank_id}"),
+        ]
+    ])
 
 
 def top_prank_kb(prank_id: int):
@@ -76,7 +85,7 @@ def top_prank_kb(prank_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="▶️ Слухати", callback_data=f"play_{prank_id}"),
-            InlineKeyboardButton(text="❤️", callback_data=f"fav_{prank_id}"),
+            InlineKeyboardButton(text="📢", callback_data=f"share_{prank_id}"),
         ]
     ])
 

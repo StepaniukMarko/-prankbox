@@ -10,14 +10,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN, ADMIN_IDS, REFERRAL_BONUS, SUPPORT_USERNAME
 from database import (
     init_db, ensure_user, get_user, get_page_categories, get_all_categories,
-    get_pranks_by_category, get_prank, get_top_pranks, get_random_pranks,
+    get_pranks_by_category, get_pranks_by_category_page, get_prank,
+    get_top_pranks, get_random_pranks,
     increment_play_count, add_prank, delete_prank, rename_prank,
     change_prank_category, add_favorite, get_favorites, get_favorites_count,
     get_bot_stats, get_all_users_ids, get_pranks_paginated, get_category_name,
     get_category_info
 )
 from keyboards import (
-    main_menu, pranks_menu, category_page_kb, prank_card_kb,
+    main_menu, pranks_menu, category_page_kb, prank_list_kb, prank_audio_kb,
     top_prank_kb, favorites_empty_kb, about_kb
 )
 
@@ -141,6 +142,10 @@ async def cmd_earn(msg: Message):
     link = f"https://t.me/{me.username}?start=ref_{msg.from_user.id}"
     user = await get_user(msg.from_user.id)
 
+    share_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Поділитися ботом", url=f"https://t.me/share/url?url={link}&text=🤪 PrankBox — аудіо для розіграшів друзів!")]
+    ])
+
     await msg.answer(
         f"💰 <b>Отримуй монети за друзів</b>\n\n"
         f"👥 +{REFERRAL_BONUS} монет за кожного запрошеного\n\n"
@@ -148,7 +153,8 @@ async def cmd_earn(msg: Message):
         f"┌ 👥 Запрошено: {user['referral_count']}\n"
         f"└ 💰 Баланс: {user['balance']} монет\n\n"
         f"📤 Надішли посилання друзям!",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=share_kb
     )
 
 
@@ -328,17 +334,11 @@ async def menu_random(msg: Message):
 
     await msg.answer("🌀 <b>Випадкові записи:</b>", parse_mode="HTML")
     for r in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="❤️", callback_data=f"fav_{r['id']}"),
-                InlineKeyboardButton(text="📤 Надіслати", switch_inline_query=f"prank_{r['id']}"),
-            ]
-        ])
         await msg.answer_audio(
             r["file_id"],
             caption=f"🎵 <b>{r['title']}</b>\n🎧 {r['play_count']} прослуховувань",
             parse_mode="HTML",
-            reply_markup=kb
+            reply_markup=prank_audio_kb(r['id'])
         )
 
 
@@ -361,7 +361,9 @@ async def menu_fav(msg: Message):
     await msg.answer(f"❤️ <b>Обране</b> ({len(rows)} аудіо):", parse_mode="HTML")
     for r in rows[:10]:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Надіслати", switch_inline_query=f"prank_{r['id']}")]
+            [
+                InlineKeyboardButton(text="📢 Поділитися", callback_data=f"share_{r['id']}"),
+            ]
         ])
         await msg.answer_audio(
             r["file_id"],
@@ -414,56 +416,54 @@ async def cb_noop(cb: CallbackQuery):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CATEGORY → PRANK LIST
+# CATEGORY → PRANK LIST (shows all at once, paginated by 10)
 # ═══════════════════════════════════════════════════════════════════
+
+PRANKS_PER_PAGE = 10
+
 
 @router.callback_query(F.data.startswith("cat_"))
 async def cb_open_cat(cb: CallbackQuery):
     cat_id = int(cb.data.split("_")[1])
-    rows = await get_pranks_by_category(cat_id)
+    rows, total = await get_pranks_by_category_page(cat_id, 0, PRANKS_PER_PAGE)
 
     if not rows:
         return await cb.answer("📭 У цій категорії поки немає аудіо", show_alert=True)
 
     cat_name = await get_category_name(cat_id)
-    p = rows[0]
-    text = (
-        f"🎵 <b>{p[1]}</b>\n\n"
-        f"📂 {cat_name}\n"
-        f"🎧 {p[2]} прослуховувань"
+    text = f"📂 <b>{cat_name}</b> — {total} аудіо\n\nНатисни ▶️ щоб прослухати:"
+
+    await cb.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=prank_list_kb(rows, cat_id, 0, total, PRANKS_PER_PAGE)
     )
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=prank_card_kb(p[0], cat_id, 0, len(rows)))
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("pnav_"))
-async def cb_prank_nav(cb: CallbackQuery):
+@router.callback_query(F.data.startswith("clist_"))
+async def cb_cat_list_page(cb: CallbackQuery):
+    """Pagination within a category prank list."""
     parts = cb.data.split("_")
     cat_id = int(parts[1])
-    index = int(parts[2])
-    rows = await get_pranks_by_category(cat_id)
+    page = int(parts[2])
+    offset = page * PRANKS_PER_PAGE
 
+    rows, total = await get_pranks_by_category_page(cat_id, offset, PRANKS_PER_PAGE)
     if not rows:
-        return await cb.answer("📭 Помилка")
-
-    if index >= len(rows):
-        index = len(rows) - 1
-    if index < 0:
-        index = 0
+        return await cb.answer("Немає більше аудіо")
 
     cat_name = await get_category_name(cat_id)
-    p = rows[index]
-    text = (
-        f"🎵 <b>{p[1]}</b>\n\n"
-        f"📂 {cat_name}\n"
-        f"🎧 {p[2]} прослуховувань"
+    text = f"📂 <b>{cat_name}</b> — {total} аудіо\n\nНатисни ▶️ щоб прослухати:"
+
+    await cb.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=prank_list_kb(rows, cat_id, page, total, PRANKS_PER_PAGE)
     )
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=prank_card_kb(p[0], cat_id, index, len(rows)))
     await cb.answer()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PLAY & FAVORITE
+# PLAY, FAVORITE & SHARE
 # ═══════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("play_"))
@@ -475,9 +475,25 @@ async def cb_play(cb: CallbackQuery):
         await cb.message.answer_audio(
             row["file_id"],
             caption=f"🎵 <b>{row['title']}</b>\n🎧 {row['play_count']} прослуховувань",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=prank_audio_kb(prank_id)
         )
     await cb.answer("▶️ Відтворення")
+
+
+@router.callback_query(F.data.startswith("share_"))
+async def cb_share(cb: CallbackQuery):
+    """Share bot link with referral."""
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{cb.from_user.id}"
+    await cb.message.answer(
+        "🤪 <b>Поділися PrankBox з друзями!</b>\n\n"
+        "🎧 Сотні аудіо для розіграшів\n\n"
+        f"🔗 Твоє посилання:\n<code>{link}</code>\n\n"
+        "👥 Запрошуй друзів та отримуй монети",
+        parse_mode="HTML"
+    )
+    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("fav_"))
