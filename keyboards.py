@@ -5,7 +5,7 @@ def main_menu():
     """Main bot menu keyboard."""
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="😆 Розіграші"), KeyboardButton(text="🏆 ТОП 10")],
-        [KeyboardButton(text="❤️ Обране"), KeyboardButton(text="🌀 Випадкові")],
+        [KeyboardButton(text="📢 Поділитися ботом"), KeyboardButton(text="🌀 Випадкові")],
         [KeyboardButton(text="💸 Заробити"), KeyboardButton(text="👤 Мій акаунт")],
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="ℹ️ Про бота")],
     ], resize_keyboard=True)
@@ -71,11 +71,10 @@ def prank_list_kb(pranks: list, cat_id: int, page: int, total_count: int, per_pa
 
 
 def prank_audio_kb(prank_id: int):
-    """Buttons shown under a played audio — share bot only (no ❤️ duplicate)."""
+    """Buttons shown under a played audio — share bot."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📢 Поділитися ботом", callback_data=f"share_{prank_id}"),
-            InlineKeyboardButton(text="❤️", callback_data=f"fav_{prank_id}"),
         ]
     ])
 
@@ -87,13 +86,6 @@ def top_prank_kb(prank_id: int):
             InlineKeyboardButton(text="▶️ Слухати", callback_data=f"play_{prank_id}"),
             InlineKeyboardButton(text="📢", callback_data=f"share_{prank_id}"),
         ]
-    ])
-
-
-def favorites_empty_kb():
-    """Keyboard when favorites are empty."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="😆 До розіграшів", callback_data="go_pranks")]
     ])
 
 

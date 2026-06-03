@@ -13,13 +13,13 @@ from database import (
     get_pranks_by_category, get_pranks_by_category_page, get_prank,
     get_top_pranks, get_random_pranks,
     increment_play_count, add_prank, delete_prank, rename_prank,
-    change_prank_category, add_favorite, get_favorites, get_favorites_count,
+    change_prank_category,
     get_bot_stats, get_all_users_ids, get_pranks_paginated, get_category_name,
     get_category_info
 )
 from keyboards import (
     main_menu, pranks_menu, category_page_kb, prank_list_kb, prank_audio_kb,
-    top_prank_kb, favorites_empty_kb, about_kb
+    top_prank_kb, about_kb
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -87,7 +87,6 @@ async def cmd_cancel(msg: Message, state: FSMContext):
 async def cmd_profile(msg: Message):
     await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
     user = await get_user(msg.from_user.id)
-    fav_count = await get_favorites_count(msg.from_user.id)
 
     created = user["created_at"].strftime("%d.%m.%Y") if user["created_at"] else "—"
 
@@ -97,8 +96,7 @@ async def cmd_profile(msg: Message):
         f"├ 👤 Username: @{user['username'] or 'не вказано'}\n"
         f"├ 📅 Реєстрація: {created}\n"
         f"├ 💰 Баланс: {user['balance']} монет\n"
-        f"├ 👥 Рефералів: {user['referral_count']}\n"
-        f"└ ❤️ Обране: {fav_count}",
+        f"└ 👥 Рефералів: {user['referral_count']}",
         parse_mode="HTML"
     )
 
@@ -240,12 +238,10 @@ async def cmd_faq(msg: Message):
         "❓ <b>Часті запитання</b>\n\n"
         "🎵 <b>Як слухати?</b>\n"
         "    Обери категорію → натисни ▶️ Слухати\n\n"
-        "❤️ <b>Як зберегти?</b>\n"
-        "    Натисни ❤️ під аудіо\n\n"
+        "📢 <b>Як поділитися?</b>\n"
+        "    Натисни 📢 під аудіо або в меню\n\n"
         "💸 <b>Як заробити?</b>\n"
         "    Запрошуй друзів і отримуй монети\n\n"
-        "📤 <b>Як надіслати?</b>\n"
-        "    Натисни 📤 Надіслати під аудіо\n\n"
         f"📞 <b>Підтримка:</b> {SUPPORT_USERNAME}",
         parse_mode="HTML"
     )
@@ -257,12 +253,10 @@ async def cb_show_faq(cb: CallbackQuery):
         "❓ <b>Часті запитання</b>\n\n"
         "🎵 <b>Як слухати?</b>\n"
         "    Обери категорію → натисни ▶️ Слухати\n\n"
-        "❤️ <b>Як зберегти?</b>\n"
-        "    Натисни ❤️ під аудіо\n\n"
+        "📢 <b>Як поділитися?</b>\n"
+        "    Натисни 📢 під аудіо або в меню\n\n"
         "💸 <b>Як заробити?</b>\n"
         "    Запрошуй друзів і отримуй монети\n\n"
-        "📤 <b>Як надіслати?</b>\n"
-        "    Натисни 📤 Надіслати під аудіо\n\n"
         f"📞 <b>Підтримка:</b> {SUPPORT_USERNAME}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -343,40 +337,24 @@ async def menu_random(msg: Message):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FAVORITES
+# SHARE BOT (replaces Favorites in menu)
 # ═══════════════════════════════════════════════════════════════════
 
-@router.message(F.text == "❤️ Обране")
-async def menu_fav(msg: Message):
-    rows = await get_favorites(msg.from_user.id)
-
-    if not rows:
-        return await msg.answer(
-            "❤️ <b>Тут поки немає обраних</b>\n\n"
-            "Натискай ❤️ під аудіо щоб зберігати їх",
-            parse_mode="HTML",
-            reply_markup=favorites_empty_kb()
-        )
-
-    await msg.answer(f"❤️ <b>Обране</b> ({len(rows)} аудіо):", parse_mode="HTML")
-    for r in rows[:10]:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📢 Поділитися", callback_data=f"share_{r['id']}"),
-            ]
-        ])
-        await msg.answer_audio(
-            r["file_id"],
-            caption=f"❤️ <b>{r['title']}</b>\n🎧 {r['play_count']} прослуховувань",
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-
-
-@router.callback_query(F.data == "go_pranks")
-async def cb_go_pranks(cb: CallbackQuery):
-    await cb.message.answer("😆 <b>Обери розділ:</b>", parse_mode="HTML", reply_markup=pranks_menu())
-    await cb.answer()
+@router.message(F.text == "📢 Поділитися ботом")
+async def menu_share_bot(msg: Message):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{msg.from_user.id}"
+    share_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Поділитися", url=f"https://t.me/share/url?url={link}&text=🤪 PrankBox — аудіо для розіграшів друзів!")]
+    ])
+    await msg.answer(
+        "🤪 <b>Поділися PrankBox з друзями!</b>\n\n"
+        "🎧 Сотні аудіо для розіграшів\n\n"
+        f"🔗 Твоє посилання:\n<code>{link}</code>\n\n"
+        "👥 Запрошуй друзів та отримуй монети",
+        parse_mode="HTML",
+        reply_markup=share_kb
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -463,7 +441,7 @@ async def cb_cat_list_page(cb: CallbackQuery):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PLAY, FAVORITE & SHARE
+# PLAY & SHARE
 # ═══════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("play_"))
@@ -494,17 +472,6 @@ async def cb_share(cb: CallbackQuery):
         parse_mode="HTML"
     )
     await cb.answer()
-
-
-@router.callback_query(F.data.startswith("fav_"))
-async def cb_fav(cb: CallbackQuery):
-    prank_id = int(cb.data.split("_")[1])
-    added = await add_favorite(cb.from_user.id, prank_id)
-
-    if added:
-        await cb.answer("❤️ Додано в обране!", show_alert=True)
-    else:
-        await cb.answer("Вже в обраному!", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("backcat_"))
