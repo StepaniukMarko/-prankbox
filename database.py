@@ -58,7 +58,7 @@ async def init_db():
             user_id BIGINT NOT NULL,
             username TEXT,
             phone_number TEXT NOT NULL,
-            scenario TEXT NOT NULL,
+            prank_id INTEGER REFERENCES pranks(id) ON DELETE SET NULL,
             status TEXT DEFAULT 'pending_payment',
             payment_id TEXT,
             created_at TIMESTAMP DEFAULT NOW(),
@@ -300,13 +300,13 @@ async def get_category_info(cat_id: int):
 
 # ─── PRANK CALLS OPERATIONS ───────────────────────────────────────
 
-async def create_prank_call(user_id: int, username: str, phone_number: str, scenario: str) -> int:
+async def create_prank_call(user_id: int, username: str, phone_number: str, prank_id: int) -> int:
     """Create a new prank call order. Returns the call ID."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO prank_calls (user_id, username, phone_number, scenario, status)
+            """INSERT INTO prank_calls (user_id, username, phone_number, prank_id, status)
                VALUES ($1, $2, $3, $4, 'pending_payment') RETURNING id""",
-            user_id, username, phone_number, scenario
+            user_id, username, phone_number, prank_id
         )
     return row["id"]
 
@@ -353,6 +353,17 @@ async def get_prank_call(call_id: int):
     """Get prank call by ID."""
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM prank_calls WHERE id=$1", call_id)
+
+
+async def get_pranks_for_calls(offset: int = 0, limit: int = 10):
+    """Get all available pranks for call menu (paginated)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, title, file_id FROM pranks WHERE hidden=0 ORDER BY id LIMIT $1 OFFSET $2",
+            limit, offset
+        )
+        count = await conn.fetchval("SELECT COUNT(*) FROM pranks WHERE hidden=0")
+    return rows, count or 0
 
 
 async def get_calls_stats():

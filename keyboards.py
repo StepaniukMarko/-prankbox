@@ -97,19 +97,6 @@ def about_kb():
     ])
 
 
-def call_scenarios_kb():
-    """Inline keyboard with call scenarios."""
-    from call_provider import CALL_SCENARIOS
-    buttons = []
-    for key, info in CALL_SCENARIOS.items():
-        buttons.append([InlineKeyboardButton(
-            text=f"{info['emoji']} {info['name']}",
-            callback_data=f"callsc_{key}"
-        )])
-    buttons.append([InlineKeyboardButton(text="🏁 Скасувати", callback_data="call_cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
 def call_confirm_kb(call_id: int):
     """Confirm & pay button for a call."""
     return InlineKeyboardMarkup(inline_keyboard=[
