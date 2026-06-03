@@ -4,10 +4,10 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 def main_menu():
     """Main bot menu keyboard."""
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="😆 Розіграші"), KeyboardButton(text="🏆 ТОП 10")],
-        [KeyboardButton(text="📢 Поділитися ботом"), KeyboardButton(text="🌀 Випадкові")],
-        [KeyboardButton(text="💸 Заробити"), KeyboardButton(text="👤 Мій акаунт")],
-        [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="ℹ️ Про бота")],
+        [KeyboardButton(text="😆 Розіграші"), KeyboardButton(text="📞 Пранк-дзвінки")],
+        [KeyboardButton(text="🏆 ТОП 10"), KeyboardButton(text="🌀 Випадкові")],
+        [KeyboardButton(text="📢 Поділитися ботом"), KeyboardButton(text="💸 Заробити")],
+        [KeyboardButton(text="👤 Мій акаунт"), KeyboardButton(text="ℹ️ Про бота")],
     ], resize_keyboard=True)
 
 
@@ -94,4 +94,25 @@ def about_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="show_stats")],
         [InlineKeyboardButton(text="❓ FAQ", callback_data="show_faq")],
+    ])
+
+
+def call_scenarios_kb():
+    """Inline keyboard with call scenarios."""
+    from call_provider import CALL_SCENARIOS
+    buttons = []
+    for key, info in CALL_SCENARIOS.items():
+        buttons.append([InlineKeyboardButton(
+            text=f"{info['emoji']} {info['name']}",
+            callback_data=f"callsc_{key}"
+        )])
+    buttons.append([InlineKeyboardButton(text="🏁 Скасувати", callback_data="call_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def call_confirm_kb(call_id: int):
+    """Confirm & pay button for a call."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ Оплатити", callback_data=f"callpay_{call_id}")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="call_cancel")],
     ])

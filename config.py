@@ -6,6 +6,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "10"))
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@admin")
+CALL_PRICE_STARS = int(os.getenv("CALL_PRICE_STARS", "79"))
 
 # Categories configuration
 # Format: (name, emoji, category_id)

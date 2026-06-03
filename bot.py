@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import BOT_TOKEN, ADMIN_IDS, REFERRAL_BONUS, SUPPORT_USERNAME
+from config import BOT_TOKEN, ADMIN_IDS, REFERRAL_BONUS, SUPPORT_USERNAME, CALL_PRICE_STARS
 from database import (
     init_db, ensure_user, get_user, get_page_categories, get_all_categories,
     get_pranks_by_category, get_pranks_by_category_page, get_prank,
@@ -15,12 +15,15 @@ from database import (
     increment_play_count, add_prank, delete_prank, rename_prank,
     change_prank_category,
     get_bot_stats, get_all_users_ids, get_pranks_paginated, get_category_name,
-    get_category_info
+    get_category_info,
+    create_prank_call, update_call_payment, update_call_status,
+    complete_call, fail_call, get_prank_call, get_calls_stats
 )
 from keyboards import (
     main_menu, pranks_menu, category_page_kb, prank_list_kb, prank_audio_kb,
-    top_prank_kb, about_kb
+    top_prank_kb, about_kb, call_scenarios_kb, call_confirm_kb
 )
+from call_provider import get_call_provider, CALL_SCENARIOS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,6 +48,10 @@ class AddAudio(StatesGroup):
 
 class RenameAudio(StatesGroup):
     waiting_new_title = State()
+
+
+class PrankCall(StatesGroup):
+    waiting_phone = State()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -494,6 +501,215 @@ async def cb_back_cat(cb: CallbackQuery):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# PRANK CALLS
+# ═══════════════════════════════════════════════════════════════════
+
+@router.message(F.text == "📞 Пранк-дзвінки")
+async def menu_calls(msg: Message):
+    await msg.answer(
+        "📞 <b>Пранк-дзвінки</b>\n\n"
+        "Обери сценарій для дзвінка.\n"
+        "Бот зателефонує твоєму другу з вибраним пранком!\n\n"
+        f"💰 Вартість: {CALL_PRICE_STARS} ⭐",
+        parse_mode="HTML",
+        reply_markup=call_scenarios_kb()
+    )
+
+
+@router.callback_query(F.data.startswith("callsc_"))
+async def cb_call_scenario(cb: CallbackQuery, state: FSMContext):
+    scenario_key = cb.data.replace("callsc_", "")
+    if scenario_key not in CALL_SCENARIOS:
+        return await cb.answer("❌ Невідомий сценарій")
+
+    await state.set_state(PrankCall.waiting_phone)
+    await state.update_data(scenario=scenario_key)
+
+    scenario = CALL_SCENARIOS[scenario_key]
+    await cb.message.edit_text(
+        f"📞 <b>Сценарій: {scenario['emoji']} {scenario['name']}</b>\n\n"
+        f"📝 {scenario['description']}\n\n"
+        "Введіть номер телефону у форматі:\n"
+        "<code>+380XXXXXXXXX</code>",
+        parse_mode="HTML"
+    )
+    await cb.answer()
+
+
+@router.message(PrankCall.waiting_phone)
+async def call_phone_entered(msg: Message, state: FSMContext):
+    phone = msg.text.strip() if msg.text else ""
+
+    # Validate phone format
+    import re
+    if not re.match(r"^\+380\d{9}$", phone):
+        return await msg.answer(
+            "❌ <b>Невірний формат номера</b>\n\n"
+            "Введіть номер у форматі: <code>+380XXXXXXXXX</code>\n"
+            "(12 цифр, починається з +380)",
+            parse_mode="HTML"
+        )
+
+    data = await state.get_data()
+    scenario_key = data.get("scenario")
+    scenario = CALL_SCENARIOS.get(scenario_key)
+
+    if not scenario:
+        await state.clear()
+        return await msg.answer("❌ Помилка. Спробуйте заново.", reply_markup=main_menu())
+
+    # Create call order in DB
+    call_id = await create_prank_call(
+        user_id=msg.from_user.id,
+        username=msg.from_user.username or "",
+        phone_number=phone,
+        scenario=scenario_key
+    )
+
+    await state.clear()
+
+    await msg.answer(
+        f"📞 <b>Замовлення дзвінка</b>\n\n"
+        f"┌ 🎭 Сценарій: {scenario['emoji']} {scenario['name']}\n"
+        f"├ 📱 Номер: <code>{phone}</code>\n"
+        f"└ 💰 Вартість: {CALL_PRICE_STARS} ⭐\n\n"
+        "Натисніть «Оплатити» для підтвердження:",
+        parse_mode="HTML",
+        reply_markup=call_confirm_kb(call_id)
+    )
+
+
+@router.callback_query(F.data.startswith("callpay_"))
+async def cb_call_pay(cb: CallbackQuery):
+    call_id = int(cb.data.replace("callpay_", ""))
+    call = await get_prank_call(call_id)
+
+    if not call:
+        return await cb.answer("❌ Замовлення не знайдено")
+    if call["user_id"] != cb.from_user.id:
+        return await cb.answer("❌ Це не ваше замовлення")
+    if call["status"] != "pending_payment":
+        return await cb.answer("⚠️ Вже оплачено або скасовано")
+
+    scenario = CALL_SCENARIOS.get(call["scenario"], {})
+    scenario_name = scenario.get("name", call["scenario"])
+
+    # Send Telegram Stars invoice
+    from aiogram.types import LabeledPrice
+    await bot.send_invoice(
+        chat_id=cb.from_user.id,
+        title=f"Пранк-дзвінок: {scenario_name}",
+        description=f"Дзвінок на {call['phone_number']} зі сценарієм «{scenario_name}»",
+        payload=f"call_{call_id}",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice(label="Пранк-дзвінок", amount=CALL_PRICE_STARS)],
+    )
+    await cb.answer()
+
+
+@router.pre_checkout_query()
+async def pre_checkout(query):
+    """Accept all pre-checkout queries for Stars payments."""
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment(msg: Message):
+    """Handle successful Stars payment."""
+    payload = msg.successful_payment.invoice_payload
+
+    if not payload.startswith("call_"):
+        return
+
+    call_id = int(payload.replace("call_", ""))
+    payment_id = msg.successful_payment.telegram_payment_charge_id
+
+    # Update payment status
+    await update_call_payment(call_id, payment_id)
+
+    call = await get_prank_call(call_id)
+    scenario = CALL_SCENARIOS.get(call["scenario"], {})
+
+    await msg.answer(
+        "✅ <b>Оплату отримано!</b>\n\n"
+        f"📞 Дзвінок поставлено в чергу\n"
+        f"🎭 Сценарій: {scenario.get('emoji', '')} {scenario.get('name', '')}\n"
+        f"📱 Номер: <code>{call['phone_number']}</code>\n\n"
+        "⏳ Очікуйте — дзвінок буде виконано найближчим часом.",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+
+    # Initiate the call in background
+    asyncio.create_task(execute_prank_call(call_id, msg.from_user.id))
+
+
+async def execute_prank_call(call_id: int, user_id: int):
+    """Background task: execute the prank call via provider."""
+    call = await get_prank_call(call_id)
+    if not call:
+        return
+
+    await update_call_status(call_id, "calling")
+
+    provider = get_call_provider()
+    try:
+        result = await provider.make_call(call["phone_number"], call["scenario"])
+
+        if result.success:
+            await complete_call(call_id, result.duration, result.recording_url)
+
+            scenario = CALL_SCENARIOS.get(call["scenario"], {})
+            minutes = result.duration // 60
+            seconds = result.duration % 60
+            duration_str = f"{minutes}:{seconds:02d}" if minutes else f"{seconds} сек"
+
+            text = (
+                "✅ <b>Дзвінок завершено!</b>\n\n"
+                f"📞 Сценарій: {scenario.get('emoji', '')} {scenario.get('name', '')}\n"
+                f"⏱ Тривалість: {duration_str}\n"
+            )
+
+            if result.recording_url:
+                text += "🎧 Запис дзвінка:"
+
+            await bot.send_message(user_id, text, parse_mode="HTML")
+
+            # Send recording if available
+            if result.recording_url:
+                recording_bytes = await provider.get_recording(result.provider_call_id)
+                if recording_bytes:
+                    from aiogram.types import BufferedInputFile
+                    audio_file = BufferedInputFile(recording_bytes, filename="prank_call.ogg")
+                    await bot.send_audio(user_id, audio_file, caption="🎧 Запис пранк-дзвінка")
+        else:
+            await fail_call(call_id)
+            await bot.send_message(
+                user_id,
+                "❌ <b>Дзвінок не вдався</b>\n\n"
+                "Абонент не відповів або номер недоступний.\n"
+                "Зверніться до підтримки для повернення коштів.",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Call {call_id} failed with error: {e}")
+        await fail_call(call_id)
+        await bot.send_message(
+            user_id,
+            "❌ <b>Помилка при виконанні дзвінка</b>\n\n"
+            "Зверніться до підтримки.",
+            parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data == "call_cancel")
+async def cb_call_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("❌ Скасовано")
+    await cb.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # ADMIN PANEL
 # ═══════════════════════════════════════════════════════════════════
 
@@ -503,12 +719,20 @@ async def cmd_admin(msg: Message):
         return
 
     stats = await get_bot_stats()
+    call_stats = await get_calls_stats()
     await msg.answer(
         "🔧 <b>Адмін-панель PrankBox</b>\n\n"
+        f"<b>📊 Загальна статистика:</b>\n"
         f"┌ 👥 Користувачів: {stats['users']}\n"
         f"├ 🎵 Аудіо: {stats['pranks']}\n"
         f"├ 🎧 Прослуховувань: {stats['plays']}\n"
         f"└ 📂 Категорій: {stats['categories']}\n\n"
+        f"<b>📞 Пранк-дзвінки:</b>\n"
+        f"┌ 📋 Замовлень: {call_stats['total']}\n"
+        f"├ 💳 Оплачено: {call_stats['paid']}\n"
+        f"├ ✅ Виконано: {call_stats['completed']}\n"
+        f"├ ❌ Невдалих: {call_stats['failed']}\n"
+        f"└ ⭐ Прибуток: {call_stats['revenue_stars']} Stars\n\n"
         "📤 Надішліть аудіо (можна декілька) — назва автоматична\n\n"
         "<b>Команди:</b>\n"
         "/manage — Керування записами\n"

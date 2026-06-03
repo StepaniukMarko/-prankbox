@@ -53,9 +53,25 @@ async def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS prank_calls (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            username TEXT,
+            phone_number TEXT NOT NULL,
+            scenario TEXT NOT NULL,
+            status TEXT DEFAULT 'pending_payment',
+            payment_id TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP,
+            recording_url TEXT,
+            call_duration INTEGER DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS idx_pranks_category ON pranks(category_id);
         CREATE INDEX IF NOT EXISTS idx_pranks_play_count ON pranks(play_count DESC);
         CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
+        CREATE INDEX IF NOT EXISTS idx_prank_calls_user ON prank_calls(user_id);
+        CREATE INDEX IF NOT EXISTS idx_prank_calls_status ON prank_calls(status);
         """)
 
         # Seed categories (idempotent — won't duplicate)
@@ -280,3 +296,77 @@ async def get_category_info(cat_id: int):
     """Get category group and page info."""
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT group_name, page_num FROM categories WHERE id=$1", cat_id)
+
+
+# ─── PRANK CALLS OPERATIONS ───────────────────────────────────────
+
+async def create_prank_call(user_id: int, username: str, phone_number: str, scenario: str) -> int:
+    """Create a new prank call order. Returns the call ID."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO prank_calls (user_id, username, phone_number, scenario, status)
+               VALUES ($1, $2, $3, $4, 'pending_payment') RETURNING id""",
+            user_id, username, phone_number, scenario
+        )
+    return row["id"]
+
+
+async def update_call_payment(call_id: int, payment_id: str):
+    """Mark call as paid."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE prank_calls SET status='paid', payment_id=$1 WHERE id=$2",
+            payment_id, call_id
+        )
+
+
+async def update_call_status(call_id: int, status: str):
+    """Update call status (calling, completed, failed)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE prank_calls SET status=$1 WHERE id=$2",
+            status, call_id
+        )
+
+
+async def complete_call(call_id: int, duration: int, recording_url: str = None):
+    """Mark call as completed with duration and optional recording."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE prank_calls 
+               SET status='completed', completed_at=NOW(), call_duration=$1, recording_url=$2 
+               WHERE id=$3""",
+            duration, recording_url, call_id
+        )
+
+
+async def fail_call(call_id: int, reason: str = None):
+    """Mark call as failed."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE prank_calls SET status='failed', completed_at=NOW() WHERE id=$1",
+            call_id
+        )
+
+
+async def get_prank_call(call_id: int):
+    """Get prank call by ID."""
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM prank_calls WHERE id=$1", call_id)
+
+
+async def get_calls_stats():
+    """Get prank calls statistics for admin."""
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM prank_calls")
+        paid = await conn.fetchval("SELECT COUNT(*) FROM prank_calls WHERE status != 'pending_payment'")
+        completed = await conn.fetchval("SELECT COUNT(*) FROM prank_calls WHERE status = 'completed'")
+        failed = await conn.fetchval("SELECT COUNT(*) FROM prank_calls WHERE status = 'failed'")
+        revenue = await conn.fetchval("SELECT COUNT(*) FROM prank_calls WHERE payment_id IS NOT NULL")
+    return {
+        "total": total or 0,
+        "paid": paid or 0,
+        "completed": completed or 0,
+        "failed": failed or 0,
+        "revenue_stars": (revenue or 0) * 79,
+    }
