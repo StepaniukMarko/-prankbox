@@ -1,19 +1,31 @@
 import asyncio, logging, random
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, BotCommand
+from aiogram.types import Message, CallbackQuery, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from config import BOT_TOKEN, ADMIN_IDS, REFERRAL_BONUS
 from database import init_db, get_db, CATEGORIES_PAGES
 from keyboards import main_menu, pranks_menu, category_page_kb, prank_card_kb, admin_cat_kb, admin_prank_kb
 
+from aiogram.fsm.storage.memory import MemoryStorage
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
 pending_audio = {}  # admin pending uploads
 user_pages = {}     # user_id -> {group: page}
+
+# === FSM STATES ===
+class AddAudio(StatesGroup):
+    waiting_title = State()
+    waiting_category = State()
+
+class RenameAudio(StatesGroup):
+    waiting_new_title = State()
 
 # === HELPERS ===
 async def ensure_user(msg, ref_id=None):
@@ -263,44 +275,208 @@ async def cmd_admin(msg: Message):
         f"👥 Користувачів: {u}\n"
         f"🎵 Аудіо: {p}\n"
         f"▶ Прослуховувань: {plays}\n\n"
-        f"📤 Надішліть аудіо — оберіть категорію\n"
+        f"📤 Надішліть аудіо — крок за кроком збережемо\n"
+        f"/manage — Керування записами\n"
         f"/broadcast Текст — розсилка\n"
         f"/delaudio ID — видалити\n"
         f"/listaudio ID_категорії — список", parse_mode="HTML"
     )
 
 @router.message(F.audio | F.voice, F.from_user.id.in_(ADMIN_IDS))
-async def admin_audio(msg: Message):
+async def admin_audio(msg: Message, state: FSMContext):
     audio = msg.audio or msg.voice
-    title = msg.caption or (audio.file_name if hasattr(audio,'file_name') and audio.file_name else f"Аудіо #{audio.file_id[:6]}")
-    pending_audio[msg.from_user.id] = {"file_id": audio.file_id, "title": title}
+    file_id = audio.file_id
+    # Store file_id in FSM and ask for title
+    await state.set_state(AddAudio.waiting_title)
+    await state.update_data(file_id=file_id)
+    await msg.answer("📝 <b>Введіть назву запису:</b>\n\n<i>Наприклад: Гурген хоче познайомитися</i>", parse_mode="HTML")
+
+@router.message(AddAudio.waiting_title)
+async def admin_title_entered(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        return
+    title = msg.text.strip()
+    if not title:
+        return await msg.answer("❌ Назва не може бути порожньою. Спробуйте ще раз:")
+    await state.update_data(title=title)
+    await state.set_state(AddAudio.waiting_category)
+    # Show categories
     db = await get_db()
     cur = await db.execute("SELECT id, name FROM categories ORDER BY group_name, page_num, sort_order")
     rows = await cur.fetchall()
     await db.close()
-    cats = [{"id": r[0], "name": r[1]} for r in rows]
-    await msg.answer(f"🎵 <b>{title}</b>\n\nОберіть категорію:", parse_mode="HTML", reply_markup=admin_cat_kb(cats))
+    buttons = [[InlineKeyboardButton(text=r[1], callback_data=f"fsm_cat_{r[0]}")] for r in rows[:30]]
+    buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="fsm_cancel")])
+    await msg.answer(f"📂 <b>Оберіть категорію для:</b>\n🎵 {title}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@router.callback_query(F.data.startswith("acat_"))
-async def cb_admin_save(cb: CallbackQuery):
-    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
-    cat_id = int(cb.data.split("_")[1])
-    p = pending_audio.pop(cb.from_user.id, None)
-    if not p: return await cb.answer("❌ Немає аудіо")
+@router.callback_query(F.data.startswith("fsm_cat_"))
+async def admin_fsm_cat_selected(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id not in ADMIN_IDS:
+        return await cb.answer("❌")
+    cat_id = int(cb.data.split("_")[2])
+    data = await state.get_data()
+    if not data.get("file_id"):
+        await state.clear()
+        return await cb.answer("❌ Сесія закінчилась")
+    # Save to DB
     db = await get_db()
-    await db.execute("INSERT INTO pranks (title, file_id, category_id) VALUES (?,?,?)", (p["title"], p["file_id"], cat_id))
+    await db.execute("INSERT INTO pranks (title, file_id, category_id) VALUES (?,?,?)", (data["title"], data["file_id"], cat_id))
     await db.commit()
     cur = await db.execute("SELECT name FROM categories WHERE id=?", (cat_id,))
     cat_name = (await cur.fetchone())[0]
     await db.close()
-    await cb.message.edit_text(f"✅ <b>Збережено!</b>\n\n🎵 {p['title']}\n📂 {cat_name}", parse_mode="HTML")
-    await cb.answer("✅")
+    await state.clear()
+    await cb.message.edit_text(f"✅ <b>Запис збережено!</b>\n\n🎵 {data['title']}\n📂 {cat_name}", parse_mode="HTML")
+    await cb.answer("✅ Збережено!")
 
-@router.callback_query(F.data == "acancel")
-async def cb_admin_cancel(cb: CallbackQuery):
-    pending_audio.pop(cb.from_user.id, None)
+@router.callback_query(F.data == "fsm_cancel")
+async def admin_fsm_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
     await cb.message.edit_text("❌ Скасовано")
     await cb.answer()
+
+# === ADMIN: MANAGE RECORDINGS ===
+@router.message(Command("manage"))
+async def cmd_manage(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    db = await get_db()
+    cur = await db.execute("SELECT id, title, category_id FROM pranks ORDER BY id DESC LIMIT 10")
+    rows = await cur.fetchall()
+    await db.close()
+    if not rows:
+        return await msg.answer("📭 Немає записів")
+    buttons = [[InlineKeyboardButton(text=f"🎵 {r[1]}", callback_data=f"mgr_{r[0]}")] for r in rows]
+    buttons.append([InlineKeyboardButton(text="📄 Далі →", callback_data="mgr_page_1")])
+    await msg.answer("⚙️ <b>Керування записами:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("mgr_page_"))
+async def cb_mgr_page(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    page = int(cb.data.split("_")[2])
+    offset = page * 10
+    db = await get_db()
+    cur = await db.execute("SELECT id, title FROM pranks ORDER BY id DESC LIMIT 10 OFFSET ?", (offset,))
+    rows = await cur.fetchall()
+    await db.close()
+    if not rows:
+        return await cb.answer("Більше немає записів")
+    buttons = [[InlineKeyboardButton(text=f"🎵 {r[1]}", callback_data=f"mgr_{r[0]}")] for r in rows]
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton(text="← Назад", callback_data=f"mgr_page_{page-1}"))
+    nav.append(InlineKeyboardButton(text="Далі →", callback_data=f"mgr_page_{page+1}"))
+    buttons.append(nav)
+    await cb.message.edit_text("⚙️ <b>Керування записами:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer()
+
+@router.callback_query(F.data.regexp(r"^mgr_\d+$"))
+async def cb_mgr_detail(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    prank_id = int(cb.data.split("_")[1])
+    db = await get_db()
+    cur = await db.execute("SELECT id, title, play_count, category_id FROM pranks WHERE id=?", (prank_id,))
+    row = await cur.fetchone()
+    cat = await db.execute("SELECT name FROM categories WHERE id=?", (row[3],))
+    cat_name = (await cat.fetchone())[0] if row[3] else "?"
+    await db.close()
+    buttons = [
+        [InlineKeyboardButton(text="▶ Прослухати", callback_data=f"mplay_{prank_id}")],
+        [InlineKeyboardButton(text="✏️ Перейменувати", callback_data=f"mren_{prank_id}"),
+         InlineKeyboardButton(text="📂 Змінити категорію", callback_data=f"mchcat_{prank_id}")],
+        [InlineKeyboardButton(text="🗑 Видалити", callback_data=f"mdel_{prank_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="mgr_page_0")],
+    ]
+    await cb.message.edit_text(
+        f"🎵 <b>{row[1]}</b>\n📂 {cat_name}\n▶ {row[2]} прослуховувань\n🆔 #{row[0]}",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("mplay_"))
+async def cb_mgr_play(cb: CallbackQuery):
+    prank_id = int(cb.data.split("_")[1])
+    db = await get_db()
+    cur = await db.execute("SELECT file_id, title FROM pranks WHERE id=?", (prank_id,))
+    row = await cur.fetchone()
+    await db.close()
+    if row:
+        await cb.message.answer_audio(row[0], caption=f"🎵 {row[1]}")
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("mren_"))
+async def cb_mgr_rename(cb: CallbackQuery, state: FSMContext):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    prank_id = int(cb.data.split("_")[1])
+    await state.set_state(RenameAudio.waiting_new_title)
+    await state.update_data(rename_id=prank_id)
+    await cb.message.edit_text("✏️ <b>Введіть нову назву:</b>", parse_mode="HTML")
+    await cb.answer()
+
+@router.message(RenameAudio.waiting_new_title)
+async def admin_rename_done(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        return
+    data = await state.get_data()
+    new_title = msg.text.strip()
+    if not new_title:
+        return await msg.answer("❌ Назва не може бути порожньою")
+    db = await get_db()
+    await db.execute("UPDATE pranks SET title=?, updated_at=datetime('now') WHERE id=?", (new_title, data["rename_id"]))
+    await db.commit()
+    await db.close()
+    await state.clear()
+    await msg.answer(f"✅ Перейменовано на: <b>{new_title}</b>", parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("mdel_"))
+async def cb_mgr_delete_confirm(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    prank_id = int(cb.data.split("_")[1])
+    buttons = [
+        [InlineKeyboardButton(text="✅ Так, видалити", callback_data=f"mdelyes_{prank_id}"),
+         InlineKeyboardButton(text="❌ Ні", callback_data="mgr_page_0")]
+    ]
+    await cb.message.edit_text("🗑 <b>Ви впевнені що хочете видалити?</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("mdelyes_"))
+async def cb_mgr_delete_yes(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    prank_id = int(cb.data.split("_")[1])
+    db = await get_db()
+    await db.execute("DELETE FROM favorites WHERE prank_id=?", (prank_id,))
+    await db.execute("DELETE FROM pranks WHERE id=?", (prank_id,))
+    await db.commit()
+    await db.close()
+    await cb.message.edit_text("✅ Запис видалено!")
+    await cb.answer("Видалено")
+
+@router.callback_query(F.data.startswith("mchcat_"))
+async def cb_mgr_change_cat(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    prank_id = int(cb.data.split("_")[1])
+    db = await get_db()
+    cur = await db.execute("SELECT id, name FROM categories ORDER BY group_name, page_num, sort_order")
+    rows = await cur.fetchall()
+    await db.close()
+    buttons = [[InlineKeyboardButton(text=r[1], callback_data=f"msetcat_{prank_id}_{r[0]}")] for r in rows[:30]]
+    await cb.message.edit_text("📂 <b>Оберіть нову категорію:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer()
+
+@router.callback_query(F.data.startswith("msetcat_"))
+async def cb_mgr_set_cat(cb: CallbackQuery):
+    if cb.from_user.id not in ADMIN_IDS: return await cb.answer("❌")
+    parts = cb.data.split("_")
+    prank_id = int(parts[1])
+    cat_id = int(parts[2])
+    db = await get_db()
+    await db.execute("UPDATE pranks SET category_id=?, updated_at=datetime('now') WHERE id=?", (cat_id, prank_id))
+    await db.commit()
+    cur = await db.execute("SELECT name FROM categories WHERE id=?", (cat_id,))
+    cat_name = (await cur.fetchone())[0]
+    await db.close()
+    await cb.message.edit_text(f"✅ Категорію змінено на: <b>{cat_name}</b>", parse_mode="HTML")
+    await cb.answer("✅")
 
 @router.message(Command("broadcast"))
 async def cmd_broadcast(msg: Message):
