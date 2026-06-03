@@ -35,7 +35,6 @@ dp.include_router(router)
 # ═══════════════════════════════════════════════════════════════════
 
 class AddAudio(StatesGroup):
-    waiting_title = State()
     waiting_category = State()
 
 
@@ -523,7 +522,7 @@ async def cmd_admin(msg: Message):
         f"├ 🎵 Аудіо: {stats['pranks']}\n"
         f"├ 🎧 Прослуховувань: {stats['plays']}\n"
         f"└ 📂 Категорій: {stats['categories']}\n\n"
-        "📤 Надішліть аудіо — збережемо крок за кроком\n\n"
+        "📤 Надішліть аудіо — назва визначається автоматично\n\n"
         "<b>Команди:</b>\n"
         "/manage — Керування записами\n"
         "/broadcast Текст — Розсилка\n"
@@ -537,34 +536,33 @@ async def cmd_admin(msg: Message):
 async def admin_audio(msg: Message, state: FSMContext):
     audio = msg.audio or msg.voice
     file_id = audio.file_id
-    await state.set_state(AddAudio.waiting_title)
-    await state.update_data(file_id=file_id)
-    await msg.answer(
-        "📝 <b>Введіть назву запису:</b>\n\n"
-        "<i>Наприклад: Гурген хоче познайомитися</i>",
-        parse_mode="HTML"
-    )
 
-
-@router.message(AddAudio.waiting_title)
-async def admin_title_entered(msg: Message, state: FSMContext):
-    if msg.from_user.id not in ADMIN_IDS:
-        await state.clear()
-        return
-
-    title = msg.text.strip() if msg.text else ""
+    # Auto-extract title: Telegram title > file_name (without extension) > fallback
+    title = None
+    if msg.audio:
+        if msg.audio.title:
+            title = msg.audio.title.strip()
+        elif msg.audio.file_name:
+            # Remove extension (.mp3, .ogg, .wav, .m4a, etc.)
+            name = msg.audio.file_name
+            if "." in name:
+                title = name.rsplit(".", 1)[0].strip()
+            else:
+                title = name.strip()
     if not title:
-        return await msg.answer("❌ Назва не може бути порожньою. Спробуйте ще:")
+        title = f"Аудіо #{msg.message_id}"
 
-    await state.update_data(title=title)
+    # Skip title input — go straight to category selection
     await state.set_state(AddAudio.waiting_category)
+    await state.update_data(file_id=file_id, title=title)
 
     cats = await get_all_categories()
     buttons = [[InlineKeyboardButton(text=f"{c['emoji']} {c['name']}", callback_data=f"fsm_cat_{c['id']}")] for c in cats[:30]]
     buttons.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="fsm_cancel")])
 
     await msg.answer(
-        f"📂 <b>Оберіть категорію для:</b>\n🎵 {title}",
+        f"📂 <b>Оберіть категорію для:</b>\n\n"
+        f"🎵 <b>{title}</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
@@ -587,12 +585,14 @@ async def admin_fsm_cat_selected(cb: CallbackQuery, state: FSMContext):
     await state.clear()
 
     if prank_id:
+        buttons = [[InlineKeyboardButton(text="✏️ Змінити назву", callback_data=f"mren_{prank_id}")]]
         await cb.message.edit_text(
             f"✅ <b>Запис збережено!</b>\n\n"
             f"🎵 {data['title']}\n"
             f"📂 {cat_name}\n"
             f"🆔 #{prank_id}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
         )
         await cb.answer("✅ Збережено!")
     else:
